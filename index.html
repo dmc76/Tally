@@ -533,12 +533,12 @@ function Tally() {
 
   return (
     <div style={{
-      minHeight: '100vh',
+      minHeight: '100dvh',
       background: theme.bg,
       color: theme.text,
       fontFamily: "'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       transition: 'background 0.4s ease, color 0.4s ease',
-      paddingBottom: '120px',
+      paddingBottom: 'calc(120px + env(safe-area-inset-bottom))',
       WebkitFontSmoothing: 'antialiased',
       MozOsxFontSmoothing: 'grayscale'
     }}>
@@ -691,7 +691,10 @@ function Tally() {
 
       {/* FAB */}
       <button onClick={() => setModal('add')} aria-label="Add payment" style={{
-        position: 'fixed', bottom: 28, right: 'calc(50% - 240px)', zIndex: 10,
+        position: 'fixed',
+        bottom: 'max(40px, calc(env(safe-area-inset-bottom) + 32px))',
+        right: 'max(20px, calc(50% - 240px))',
+        zIndex: 10,
         width: 60, height: 60, borderRadius: 30,
         background: theme.accent, color: theme.bg, border: 'none',
         boxShadow: theme.shadow, cursor: 'pointer',
