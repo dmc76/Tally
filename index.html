@@ -301,6 +301,7 @@ function Tally() {
   const [transactionForPot, setTransactionForPot] = useState(null); // { potId, direction: 'in'|'out' }
   const [resetForPot, setResetForPot] = useState(null); // pot id awaiting reset confirmation
   const [rolloverSnapshot, setRolloverSnapshot] = useState(null);
+  const [calcOpen, setCalcOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   // Load
@@ -689,6 +690,24 @@ function Tally() {
         )}
       </div>
 
+      {/* Calculator FAB — left of the + button */}
+      <button onClick={() => setCalcOpen(true)} aria-label="Open calculator" style={{
+        position: 'fixed',
+        bottom: 'max(40px, calc(env(safe-area-inset-bottom) + 32px))',
+        right: 'max(92px, calc(50% - 240px + 72px))',
+        zIndex: 10,
+        width: 48, height: 48, borderRadius: 24,
+        background: theme.surface, color: theme.text,
+        border: `1px solid ${theme.border}`,
+        boxShadow: theme.shadow, cursor: 'pointer',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        transition: 'transform 0.2s ease, box-shadow 0.2s ease'
+      }}
+      onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.05)'}
+      onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}>
+        <CalcIcon color={theme.text} />
+      </button>
+
       {/* FAB */}
       <button onClick={() => setModal('add')} aria-label="Add payment" style={{
         position: 'fixed',
@@ -706,6 +725,9 @@ function Tally() {
       onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}>
         <PlusIcon />
       </button>
+
+      {/* Calculator panel */}
+      {calcOpen && <Calculator theme={theme} cur={cur} onClose={() => setCalcOpen(false)} />}
 
       {/* Modals */}
       {(modal === 'add' || modal === 'edit') && (
@@ -1955,6 +1977,257 @@ function Field({ theme, label, children }) {
   );
 }
 
+// ==================================================================
+// Calculator
+// ==================================================================
+function Calculator({ theme, cur, onClose }) {
+  const [display, setDisplay] = useState('0');
+  const [previous, setPrevious] = useState(null);
+  const [replaceOnNext, setReplaceOnNext] = useState(false);
+  const [memory, setMemory] = useState(0);
+  const [memActive, setMemActive] = useState(false);
+
+  const inputDigit = (d) => {
+    if (display === '0' || replaceOnNext) {
+      setDisplay(String(d)); setReplaceOnNext(false);
+    } else {
+      if (display.replace(/[^0-9]/g, '').length >= 12) return;
+      setDisplay(display + d);
+    }
+  };
+  const inputDot = () => {
+    if (replaceOnNext) { setDisplay('0.'); setReplaceOnNext(false); return; }
+    if (!display.includes('.')) setDisplay(display + '.');
+  };
+  const clear = () => { setDisplay('0'); setPrevious(null); setReplaceOnNext(false); };
+  const backspace = () => {
+    if (replaceOnNext) return;
+    if (display.length === 1 || (display.length === 2 && display.startsWith('-'))) {
+      setDisplay('0');
+    } else {
+      setDisplay(display.slice(0, -1));
+    }
+  };
+  const toggleSign = () => {
+    if (display === '0') return;
+    setDisplay(display.startsWith('-') ? display.slice(1) : '-' + display);
+  };
+  const percent = () => { setDisplay(String(Number(display) / 100)); setReplaceOnNext(true); };
+
+  const calc = (a, b, op) => {
+    switch (op) {
+      case '+': return a + b;
+      case '−': return a - b;
+      case '×': return a * b;
+      case '÷': return b === 0 ? NaN : a / b;
+      default: return b;
+    }
+  };
+  const formatResult = (n) => {
+    if (!isFinite(n) || isNaN(n)) return 'Error';
+    const rounded = Math.round(n * 1e8) / 1e8;
+    let s = rounded.toString();
+    if (s.includes('e')) s = rounded.toFixed(8).replace(/\.?0+$/, '');
+    return s;
+  };
+
+  const setOp = (op) => {
+    const current = parseFloat(display);
+    if (previous && !replaceOnNext) {
+      const result = calc(previous.value, current, previous.op);
+      const formatted = formatResult(result);
+      setDisplay(formatted);
+      setPrevious({ value: parseFloat(formatted), op });
+    } else {
+      setPrevious({ value: current, op });
+    }
+    setReplaceOnNext(true);
+  };
+  const equals = () => {
+    if (!previous) return;
+    const current = parseFloat(display);
+    const result = calc(previous.value, current, previous.op);
+    setDisplay(formatResult(result));
+    setPrevious(null);
+    setReplaceOnNext(true);
+  };
+
+  const mPlus = () => {
+    const n = parseFloat(display);
+    if (!isNaN(n)) { setMemory(m => Number((m + n).toFixed(8))); setMemActive(true); setReplaceOnNext(true); }
+  };
+  const mMinus = () => {
+    const n = parseFloat(display);
+    if (!isNaN(n)) { setMemory(m => Number((m - n).toFixed(8))); setMemActive(true); setReplaceOnNext(true); }
+  };
+  const mRecall = () => { setDisplay(formatResult(memory)); setReplaceOnNext(true); };
+  const mClear = () => { setMemory(0); setMemActive(false); };
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key >= '0' && e.key <= '9') { inputDigit(e.key); return; }
+      if (e.key === '.') { inputDot(); return; }
+      if (e.key === '+') { setOp('+'); return; }
+      if (e.key === '-') { setOp('−'); return; }
+      if (e.key === '*' || e.key === 'x') { setOp('×'); return; }
+      if (e.key === '/') { e.preventDefault(); setOp('÷'); return; }
+      if (e.key === 'Enter' || e.key === '=') { equals(); return; }
+      if (e.key === 'Backspace') { backspace(); return; }
+      if (e.key === 'Escape') { onClose(); return; }
+      if (e.key.toLowerCase() === 'c') { clear(); return; }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [display, previous, replaceOnNext, memory]);
+
+  const formattedDisplay = (() => {
+    if (display === 'Error') return 'Error';
+    if (display.endsWith('.')) return display;
+    const n = parseFloat(display);
+    if (isNaN(n)) return display;
+    const [int, dec] = display.replace('-', '').split('.');
+    const intFormatted = Number(int).toLocaleString('en-GB');
+    const sign = display.startsWith('-') ? '-' : '';
+    return sign + intFormatted + (dec !== undefined ? '.' + dec : '');
+  })();
+
+  const btn = (label, onClick, variant = 'default') => {
+    const styles = {
+      default: { background: theme.bg, color: theme.text, border: `1px solid ${theme.border}` },
+      op: { background: theme.accentSoft, color: theme.accent, border: `1px solid ${theme.border}` },
+      equals: { background: theme.accent, color: theme.bg, border: 'none' },
+      mem: { background: 'transparent', color: theme.textMuted, border: `1px solid ${theme.border}`, fontSize: 12 },
+      memActive: { background: theme.accentSoft, color: theme.accent, border: `1px solid ${theme.border}`, fontSize: 12 },
+      clear: { background: 'transparent', color: theme.textMuted, border: `1px solid ${theme.border}` }
+    };
+    return (
+      <button
+        onClick={onClick}
+        style={{
+          padding: 0, height: 48,
+          borderRadius: 12,
+          fontSize: variant === 'mem' || variant === 'memActive' ? 12 : 17,
+          fontWeight: 500, fontFamily: 'inherit',
+          cursor: 'pointer',
+          transition: 'transform 0.15s ease, background 0.2s ease',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          ...styles[variant]
+        }}
+        onMouseDown={e => e.currentTarget.style.transform = 'scale(0.96)'}
+        onMouseUp={e => e.currentTarget.style.transform = 'scale(1)'}
+        onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}>
+        {label}
+      </button>
+    );
+  };
+
+  return (
+    <>
+      <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 40, background: 'transparent' }} />
+      <div style={{
+        position: 'fixed', zIndex: 41,
+        bottom: 'max(112px, calc(env(safe-area-inset-bottom) + 104px))',
+        right: 'max(20px, calc(50% - 240px))',
+        width: 'min(320px, calc(100vw - 40px))',
+        background: theme.surface,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 20,
+        padding: 16,
+        boxShadow: '0 24px 48px rgba(0,0,0,0.35), 0 4px 12px rgba(0,0,0,0.2)',
+        animation: 'calcIn 0.22s cubic-bezier(0.34, 1.56, 0.64, 1)'
+      }}>
+        <style>{`
+          @keyframes calcIn {
+            from { opacity: 0; transform: translateY(8px) scale(0.96); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+          }
+        `}</style>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <span style={{
+            fontSize: 11, fontWeight: 600, letterSpacing: '0.12em',
+            textTransform: 'uppercase', color: theme.textFaint
+          }}>Calculator{memActive && memory !== 0 ? ` · M ${formatResult(memory)}` : ''}</span>
+          <button onClick={onClose} aria-label="Close" style={{
+            background: 'transparent', border: 'none',
+            color: theme.textMuted, cursor: 'pointer',
+            padding: 4, display: 'flex', alignItems: 'center'
+          }}>
+            <CloseIcon />
+          </button>
+        </div>
+
+        <div style={{
+          padding: '14px 14px 16px',
+          background: theme.bg,
+          border: `1px solid ${theme.border}`,
+          borderRadius: 12,
+          marginBottom: 12,
+          textAlign: 'right',
+          minHeight: 64,
+          display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
+          overflow: 'hidden'
+        }}>
+          {previous && (
+            <div style={{
+              fontSize: 12, color: theme.textFaint, lineHeight: 1.2,
+              fontFeatureSettings: '"tnum"', fontFamily: "'Fraunces', serif",
+              fontStyle: 'italic'
+            }}>
+              {formatResult(previous.value)} {previous.op}
+            </div>
+          )}
+          <div style={{
+            fontFamily: "'Fraunces', Georgia, serif",
+            fontSize: 28, fontWeight: 400,
+            color: theme.text,
+            fontFeatureSettings: '"tnum"',
+            letterSpacing: '-0.01em',
+            lineHeight: 1.1,
+            wordBreak: 'break-all'
+          }}>
+            {formattedDisplay}
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 8 }}>
+          {btn('MC', mClear, memActive ? 'memActive' : 'mem')}
+          {btn('MR', mRecall, memActive ? 'memActive' : 'mem')}
+          {btn('M−', mMinus, 'mem')}
+          {btn('M+', mPlus, 'mem')}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
+          {btn('C', clear, 'clear')}
+          {btn('±', toggleSign, 'clear')}
+          {btn('%', percent, 'clear')}
+          {btn('÷', () => setOp('÷'), 'op')}
+
+          {btn('7', () => inputDigit(7))}
+          {btn('8', () => inputDigit(8))}
+          {btn('9', () => inputDigit(9))}
+          {btn('×', () => setOp('×'), 'op')}
+
+          {btn('4', () => inputDigit(4))}
+          {btn('5', () => inputDigit(5))}
+          {btn('6', () => inputDigit(6))}
+          {btn('−', () => setOp('−'), 'op')}
+
+          {btn('1', () => inputDigit(1))}
+          {btn('2', () => inputDigit(2))}
+          {btn('3', () => inputDigit(3))}
+          {btn('+', () => setOp('+'), 'op')}
+
+          {btn('0', () => inputDigit(0))}
+          {btn('.', inputDot)}
+          {btn('⌫', backspace, 'clear')}
+          {btn('=', equals, 'equals')}
+        </div>
+      </div>
+    </>
+  );
+}
+
 const inputStyle = (theme) => ({
   width: '100%', padding: '13px 16px',
   background: theme.bg, color: theme.text,
@@ -1976,6 +2249,18 @@ const iconBtn = (theme) => ({
 const PlusIcon = () => (
   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
     <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+  </svg>
+);
+const CalcIcon = ({ color = 'currentColor' }) => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="5" y="3" width="14" height="18" rx="2.5" />
+    <line x1="9" y1="7" x2="15" y2="7" />
+    <line x1="9" y1="12" x2="9.01" y2="12" />
+    <line x1="12" y1="12" x2="12.01" y2="12" />
+    <line x1="15" y1="12" x2="15.01" y2="12" />
+    <line x1="9" y1="16" x2="9.01" y2="16" />
+    <line x1="12" y1="16" x2="12.01" y2="16" />
+    <line x1="15" y1="16" x2="15.01" y2="16" />
   </svg>
 );
 const CloseIcon = () => (
