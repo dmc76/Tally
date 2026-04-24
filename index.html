@@ -1982,16 +1982,69 @@ function Field({ theme, label, children }) {
 // ==================================================================
 function Calculator({ theme, cur, onClose }) {
   const [display, setDisplay] = useState('0');
-  const [previous, setPrevious] = useState(null);
+  const [previous, setPrevious] = useState(null); // { value, op }
   const [replaceOnNext, setReplaceOnNext] = useState(false);
   const [memory, setMemory] = useState(0);
   const [memActive, setMemActive] = useState(false);
 
+  // Drag state — position is relative to bottom-right corner (like the FABs)
+  // so we use `bottom` and `right` offsets. Start at the default position.
+  const DEFAULT_BOTTOM = 112;
+  const DEFAULT_RIGHT = 20;
+  const [pos, setPos] = useState({ bottom: DEFAULT_BOTTOM, right: DEFAULT_RIGHT });
+  const dragRef = useRef({ active: false, startX: 0, startY: 0, startBottom: 0, startRight: 0 });
+
+  const onDragStart = (clientX, clientY) => {
+    dragRef.current = {
+      active: true,
+      startX: clientX,
+      startY: clientY,
+      startBottom: pos.bottom,
+      startRight: pos.right
+    };
+  };
+  const onDragMove = (clientX, clientY) => {
+    if (!dragRef.current.active) return;
+    const dx = clientX - dragRef.current.startX;
+    const dy = clientY - dragRef.current.startY;
+    // Moving right (dx positive) should decrease `right`; moving down (dy positive) should decrease `bottom`
+    const panelW = 320;
+    const panelH = 420; // approx
+    const maxRight = Math.max(10, window.innerWidth - panelW - 10);
+    const maxBottom = Math.max(10, window.innerHeight - panelH - 10);
+    const nextRight = Math.min(maxRight, Math.max(10, dragRef.current.startRight - dx));
+    const nextBottom = Math.min(maxBottom, Math.max(10, dragRef.current.startBottom - dy));
+    setPos({ bottom: nextBottom, right: nextRight });
+  };
+  const onDragEnd = () => { dragRef.current.active = false; };
+
+  useEffect(() => {
+    const mouseMove = (e) => onDragMove(e.clientX, e.clientY);
+    const mouseUp = () => onDragEnd();
+    const touchMove = (e) => {
+      if (!dragRef.current.active) return;
+      e.preventDefault();
+      onDragMove(e.touches[0].clientX, e.touches[0].clientY);
+    };
+    const touchEnd = () => onDragEnd();
+    window.addEventListener('mousemove', mouseMove);
+    window.addEventListener('mouseup', mouseUp);
+    window.addEventListener('touchmove', touchMove, { passive: false });
+    window.addEventListener('touchend', touchEnd);
+    return () => {
+      window.removeEventListener('mousemove', mouseMove);
+      window.removeEventListener('mouseup', mouseUp);
+      window.removeEventListener('touchmove', touchMove);
+      window.removeEventListener('touchend', touchEnd);
+    };
+  }, []);
+
   const inputDigit = (d) => {
     if (display === '0' || replaceOnNext) {
-      setDisplay(String(d)); setReplaceOnNext(false);
+      setDisplay(String(d));
+      setReplaceOnNext(false);
     } else {
-      if (display.replace(/[^0-9]/g, '').length >= 12) return;
+      if (display.replace(/[^0-9]/g, '').length >= 12) return; // sensible cap
       setDisplay(display + d);
     }
   };
@@ -1999,7 +2052,9 @@ function Calculator({ theme, cur, onClose }) {
     if (replaceOnNext) { setDisplay('0.'); setReplaceOnNext(false); return; }
     if (!display.includes('.')) setDisplay(display + '.');
   };
-  const clear = () => { setDisplay('0'); setPrevious(null); setReplaceOnNext(false); };
+  const clear = () => {
+    setDisplay('0'); setPrevious(null); setReplaceOnNext(false);
+  };
   const backspace = () => {
     if (replaceOnNext) return;
     if (display.length === 1 || (display.length === 2 && display.startsWith('-'))) {
@@ -2012,7 +2067,10 @@ function Calculator({ theme, cur, onClose }) {
     if (display === '0') return;
     setDisplay(display.startsWith('-') ? display.slice(1) : '-' + display);
   };
-  const percent = () => { setDisplay(String(Number(display) / 100)); setReplaceOnNext(true); };
+  const percent = () => {
+    setDisplay(String(Number(display) / 100));
+    setReplaceOnNext(true);
+  };
 
   const calc = (a, b, op) => {
     switch (op) {
@@ -2023,8 +2081,10 @@ function Calculator({ theme, cur, onClose }) {
       default: return b;
     }
   };
+
   const formatResult = (n) => {
     if (!isFinite(n) || isNaN(n)) return 'Error';
+    // Round to 8 decimal places to avoid 0.1+0.2 jank, strip trailing zeros
     const rounded = Math.round(n * 1e8) / 1e8;
     let s = rounded.toString();
     if (s.includes('e')) s = rounded.toFixed(8).replace(/\.?0+$/, '');
@@ -2043,6 +2103,7 @@ function Calculator({ theme, cur, onClose }) {
     }
     setReplaceOnNext(true);
   };
+
   const equals = () => {
     if (!previous) return;
     const current = parseFloat(display);
@@ -2052,17 +2113,32 @@ function Calculator({ theme, cur, onClose }) {
     setReplaceOnNext(true);
   };
 
+  // Memory
   const mPlus = () => {
     const n = parseFloat(display);
-    if (!isNaN(n)) { setMemory(m => Number((m + n).toFixed(8))); setMemActive(true); setReplaceOnNext(true); }
+    if (!isNaN(n)) {
+      setMemory(m => Number((m + n).toFixed(8)));
+      setMemActive(true);
+      setReplaceOnNext(true);
+    }
   };
   const mMinus = () => {
     const n = parseFloat(display);
-    if (!isNaN(n)) { setMemory(m => Number((m - n).toFixed(8))); setMemActive(true); setReplaceOnNext(true); }
+    if (!isNaN(n)) {
+      setMemory(m => Number((m - n).toFixed(8)));
+      setMemActive(true);
+      setReplaceOnNext(true);
+    }
   };
-  const mRecall = () => { setDisplay(formatResult(memory)); setReplaceOnNext(true); };
-  const mClear = () => { setMemory(0); setMemActive(false); };
+  const mRecall = () => {
+    setDisplay(formatResult(memory));
+    setReplaceOnNext(true);
+  };
+  const mClear = () => {
+    setMemory(0); setMemActive(false);
+  };
 
+  // Key handling
   useEffect(() => {
     const onKey = (e) => {
       if (e.key >= '0' && e.key <= '9') { inputDigit(e.key); return; }
@@ -2080,9 +2156,10 @@ function Calculator({ theme, cur, onClose }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [display, previous, replaceOnNext, memory]);
 
+  // Format display with thousands separators if it's a plain number (no operations in progress, no trailing dot)
   const formattedDisplay = (() => {
     if (display === 'Error') return 'Error';
-    if (display.endsWith('.')) return display;
+    if (display.endsWith('.')) return display; // mid-input, don't reformat
     const n = parseFloat(display);
     if (isNaN(n)) return display;
     const [int, dec] = display.replace('-', '').split('.');
@@ -2091,6 +2168,7 @@ function Calculator({ theme, cur, onClose }) {
     return sign + intFormatted + (dec !== undefined ? '.' + dec : '');
   })();
 
+  // Button style helper
   const btn = (label, onClick, variant = 'default') => {
     const styles = {
       default: { background: theme.bg, color: theme.text, border: `1px solid ${theme.border}` },
@@ -2122,41 +2200,60 @@ function Calculator({ theme, cur, onClose }) {
   };
 
   return (
-    <>
-      <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 40, background: 'transparent' }} />
-      <div style={{
-        position: 'fixed', zIndex: 41,
-        bottom: 'max(112px, calc(env(safe-area-inset-bottom) + 104px))',
-        right: 'max(20px, calc(50% - 240px))',
-        width: 'min(320px, calc(100vw - 40px))',
-        background: theme.surface,
-        border: `1px solid ${theme.border}`,
-        borderRadius: 20,
-        padding: 16,
-        boxShadow: '0 24px 48px rgba(0,0,0,0.35), 0 4px 12px rgba(0,0,0,0.2)',
-        animation: 'calcIn 0.22s cubic-bezier(0.34, 1.56, 0.64, 1)'
-      }}>
-        <style>{`
-          @keyframes calcIn {
-            from { opacity: 0; transform: translateY(8px) scale(0.96); }
-            to { opacity: 1; transform: translateY(0) scale(1); }
-          }
-        `}</style>
+    <div style={{
+      position: 'fixed', zIndex: 41,
+      bottom: pos.bottom,
+      right: pos.right,
+      width: 'min(320px, calc(100vw - 40px))',
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 20,
+      padding: 16,
+      boxShadow: '0 24px 48px rgba(0,0,0,0.35), 0 4px 12px rgba(0,0,0,0.2)',
+      animation: 'calcIn 0.22s cubic-bezier(0.34, 1.56, 0.64, 1)',
+      userSelect: 'none',
+      touchAction: 'none'
+    }}>
+      <style>{`
+        @keyframes calcIn {
+          from { opacity: 0; transform: translateY(8px) scale(0.96); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+      `}</style>
 
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+      {/* Drag handle header */}
+      <div
+        onMouseDown={(e) => { onDragStart(e.clientX, e.clientY); }}
+        onTouchStart={(e) => { onDragStart(e.touches[0].clientX, e.touches[0].clientY); }}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          marginBottom: 10, marginTop: -4, marginLeft: -4, marginRight: -4,
+          padding: '6px 8px 8px',
+          cursor: 'grab',
+          borderRadius: 10
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {/* grab indicator */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <div style={{ width: 16, height: 2, borderRadius: 1, background: theme.textFaint }} />
+            <div style={{ width: 16, height: 2, borderRadius: 1, background: theme.textFaint }} />
+          </div>
           <span style={{
             fontSize: 11, fontWeight: 600, letterSpacing: '0.12em',
             textTransform: 'uppercase', color: theme.textFaint
           }}>Calculator{memActive && memory !== 0 ? ` · M ${formatResult(memory)}` : ''}</span>
-          <button onClick={onClose} aria-label="Close" style={{
-            background: 'transparent', border: 'none',
-            color: theme.textMuted, cursor: 'pointer',
-            padding: 4, display: 'flex', alignItems: 'center'
-          }}>
-            <CloseIcon />
-          </button>
         </div>
+        <button onClick={onClose} aria-label="Close" style={{
+          background: 'transparent', border: 'none',
+          color: theme.textMuted, cursor: 'pointer',
+          padding: 4, display: 'flex', alignItems: 'center'
+        }}>
+          <CloseIcon />
+        </button>
+      </div>
 
+        {/* Display */}
         <div style={{
           padding: '14px 14px 16px',
           background: theme.bg,
@@ -2190,6 +2287,7 @@ function Calculator({ theme, cur, onClose }) {
           </div>
         </div>
 
+        {/* Memory row */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 8 }}>
           {btn('MC', mClear, memActive ? 'memActive' : 'mem')}
           {btn('MR', mRecall, memActive ? 'memActive' : 'mem')}
@@ -2197,6 +2295,7 @@ function Calculator({ theme, cur, onClose }) {
           {btn('M+', mPlus, 'mem')}
         </div>
 
+        {/* Main keypad */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
           {btn('C', clear, 'clear')}
           {btn('±', toggleSign, 'clear')}
@@ -2223,8 +2322,7 @@ function Calculator({ theme, cur, onClose }) {
           {btn('⌫', backspace, 'clear')}
           {btn('=', equals, 'equals')}
         </div>
-      </div>
-    </>
+    </div>
   );
 }
 
