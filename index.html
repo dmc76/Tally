@@ -290,7 +290,8 @@ const fmtMoney = (amount, symbol) => {
 function Tally() {
   const [payments, setPayments] = useState([]);
   const [pots, setPots] = useState([]);
-  const [filter, setFilter] = useState('all'); // all | recurring | one-off
+  const [filter, setFilter] = useState('all'); // all | recurring | one-off | annual
+  const [searchTerm, setSearchTerm] = useState('');
   const [themeName, setThemeName] = useState('midnight');
   const [currency, setCurrency] = useState('GBP');
   const [skipNonWorking, setSkipNonWorking] = useState(true);
@@ -372,8 +373,15 @@ function Tally() {
   // Derived — Pots tab shows pot cards (not payments), so just filter by recurrence for other tabs
   const filtered = payments.filter(p => {
     if (filter === 'pots') return false; // Pots tab renders pots, not payments
-    if (filter === 'recurring') return p.recurrence !== 'one-off';
-    if (filter === 'one-off') return p.recurrence === 'one-off';
+    if (filter === 'annual') return false; // Annual tab renders an overview
+    if (filter === 'recurring' && p.recurrence === 'one-off') return false;
+    if (filter === 'one-off' && p.recurrence !== 'one-off') return false;
+    if (searchTerm.trim()) {
+      const q = searchTerm.trim().toLowerCase();
+      const inName = (p.name || '').toLowerCase().includes(q);
+      const inNotes = (p.notes || '').toLowerCase().includes(q);
+      if (!inName && !inNotes) return false;
+    }
     return true;
   });
 
@@ -405,6 +413,25 @@ function Tally() {
 
   const deletePayment = (id) => {
     setPayments(ps => ps.filter(p => p.id !== id));
+  };
+
+  const duplicatePayment = (id) => {
+    setPayments(ps => {
+      const original = ps.find(p => p.id === id);
+      if (!original) return ps;
+      const copy = {
+        ...original,
+        id: `p_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
+        name: `${original.name} (copy)`,
+        paid: false,
+        paidDate: undefined,
+        createdAt: todayISO()
+      };
+      const idx = ps.findIndex(p => p.id === id);
+      const next = [...ps];
+      next.splice(idx + 1, 0, copy);
+      return next;
+    });
   };
 
   // Actions — pots (self-contained savings ledgers)
@@ -479,6 +506,80 @@ function Tally() {
     createPot(name);
     setNewPotForPayment(null);
   };
+
+  // ---------- Import / Export ----------
+  const exportData = () => {
+    const data = {
+      app: 'tally',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      payments,
+      pots,
+      settings: { theme: themeName, currency, skipNonWorking, potsEnabled }
+    };
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `tally-backup-${todayISO()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const [pendingImport, setPendingImport] = useState(null);
+  const [importError, setImportError] = useState(null);
+
+  const handleImportFile = (file) => {
+    setImportError(null);
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.json')) {
+      setImportError("That doesn't look like a Tally backup file. Please choose a .json file.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (!data || data.app !== 'tally' || !Array.isArray(data.payments)) {
+          setImportError("This file doesn't look like a Tally backup. Try another file.");
+          return;
+        }
+        setPendingImport(data);
+      } catch (e) {
+        setImportError("Couldn't read that file. It may be damaged or not a Tally backup.");
+      }
+    };
+    reader.onerror = () => setImportError("Couldn't open that file. Please try again.");
+    reader.readAsText(file);
+  };
+
+  const confirmImport = () => {
+    if (!pendingImport) return;
+    const migratedPayments = (pendingImport.payments || []).map(pay => {
+      const { potId, topupPotId, type, ...rest } = pay;
+      return rest;
+    });
+    const migratedPots = (pendingImport.pots || []).map(pot => ({
+      ...pot,
+      balance: typeof pot.balance === 'number' ? pot.balance : 0,
+      transactions: Array.isArray(pot.transactions) ? pot.transactions : []
+    }));
+    setPayments(migratedPayments);
+    setPots(migratedPots);
+    if (pendingImport.settings) {
+      const s = pendingImport.settings;
+      if (s.theme && THEMES[s.theme]) setThemeName(s.theme);
+      if (s.currency && CURRENCIES[s.currency]) setCurrency(s.currency);
+      if (typeof s.skipNonWorking === 'boolean') setSkipNonWorking(s.skipNonWorking);
+      if (typeof s.potsEnabled === 'boolean') setPotsEnabled(s.potsEnabled);
+    }
+    setPendingImport(null);
+  };
+
+  const cancelImport = () => setPendingImport(null);
 
   const savePayment = (data) => {
     if (editingId) {
@@ -577,6 +678,45 @@ function Tally() {
         {/* Filter tabs */}
         <FilterTabs theme={theme} value={filter} onChange={setFilter} showPots={potsEnabled} />
 
+        {/* Search bar */}
+        {(filter === 'all' || filter === 'recurring' || filter === 'one-off') && payments.length >= 5 && (
+          <div style={{ position: 'relative', marginTop: 14 }}>
+            <svg style={{
+              position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)',
+              pointerEvents: 'none', color: theme.textFaint
+            }} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="11" cy="11" r="7" />
+              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+            </svg>
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Search payments..."
+              style={{
+                width: '100%', padding: '10px 36px 10px 38px',
+                background: theme.surface, color: theme.text,
+                border: `1px solid ${theme.border}`, borderRadius: 12,
+                fontSize: 14, fontFamily: 'inherit',
+                outline: 'none', boxSizing: 'border-box'
+              }}
+            />
+            {searchTerm && (
+              <button onClick={() => setSearchTerm('')} aria-label="Clear search" style={{
+                position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
+                background: 'transparent', border: 'none',
+                color: theme.textMuted, cursor: 'pointer',
+                padding: 6, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                borderRadius: 6
+              }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Pots tab — dedicated ledger view */}
         {filter === 'pots' ? (
           pots.length === 0 ? (
@@ -631,34 +771,52 @@ function Tally() {
               </button>
             </div>
           )
+        ) : filter === 'annual' ? (
+          <AnnualView theme={theme} cur={cur} payments={payments} />
         ) : (
           /* All / Recurring / One-off view */
           filtered.length === 0 ? (
-            <EmptyState theme={theme} onAdd={() => setModal('add')} filter={filter} />
+            searchTerm.trim() ? (
+              <div style={{
+                padding: '56px 24px', textAlign: 'center',
+                background: theme.surface, border: `1px solid ${theme.border}`,
+                borderRadius: 24, marginTop: 16
+              }}>
+                <div style={{
+                  fontFamily: "'Fraunces', serif", fontStyle: 'italic',
+                  fontSize: 20, color: theme.text, marginBottom: 6
+                }}>No matches.</div>
+                <div style={{ fontSize: 14, color: theme.textMuted, lineHeight: 1.5 }}>
+                  Nothing here matches "{searchTerm}". Try a different word.
+                </div>
+              </div>
+            ) : (
+              <EmptyState theme={theme} onAdd={() => setModal('add')} filter={filter} />
+            )
           ) : (
             <div style={{ marginTop: 8 }}>
               {overdue.length > 0 && (
                 <Section theme={theme} label="Overdue" accent={theme.red}>
                   {overdue.map(p => <PaymentRow key={p.id} p={p} theme={theme} cur={cur}
-                    onToggle={() => togglePaid(p.id)} onEdit={() => openEdit(p)} onDelete={() => deletePayment(p.id)} />)}
+                    onToggle={() => togglePaid(p.id)} onEdit={() => openEdit(p)} onDelete={() => deletePayment(p.id)} onDuplicate={() => duplicatePayment(p.id)} />)}
                 </Section>
               )}
               {soon.length > 0 && (
                 <Section theme={theme} label="Due soon" accent={theme.amber}>
                   {soon.map(p => <PaymentRow key={p.id} p={p} theme={theme} cur={cur}
-                    onToggle={() => togglePaid(p.id)} onEdit={() => openEdit(p)} onDelete={() => deletePayment(p.id)} />)}
+                    onToggle={() => togglePaid(p.id)} onEdit={() => openEdit(p)} onDelete={() => deletePayment(p.id)} onDuplicate={() => duplicatePayment(p.id)} />)}
                 </Section>
               )}
               {upcoming.length > 0 && (
                 <Section theme={theme} label="Upcoming" accent={theme.textMuted}>
                   {upcoming.map(p => <PaymentRow key={p.id} p={p} theme={theme} cur={cur}
-                    onToggle={() => togglePaid(p.id)} onEdit={() => openEdit(p)} onDelete={() => deletePayment(p.id)} />)}
+                    onToggle={() => togglePaid(p.id)} onEdit={() => openEdit(p)} onDelete={() => deletePayment(p.id)} onDuplicate={() => duplicatePayment(p.id)} />)}
                 </Section>
               )}
               {paid.length > 0 && (
                 <Section theme={theme} label="Paid" accent={theme.green}>
                   {paid.map(p => <PaymentRow key={p.id} p={p} theme={theme} cur={cur}
-                    onToggle={() => togglePaid(p.id)} onEdit={() => openEdit(p)} onDelete={() => deletePayment(p.id)} />)}
+                    onToggle={() => togglePaid(p.id)} onEdit={() => openEdit(p)} onDelete={() => deletePayment(p.id)} onDuplicate={() => duplicatePayment(p.id)} />)}
                 </Section>
               )}
 
@@ -757,6 +915,8 @@ function Tally() {
           cur={cur}
           onRenamePot={renamePot}
           onDeletePot={deletePot}
+          onExport={exportData}
+          onImport={handleImportFile}
           onClose={() => setModal(null)}
         />
       )}
@@ -821,6 +981,35 @@ function Tally() {
           cur={cur}
           snapshot={rolloverSnapshot}
           onClose={() => { setModal(null); setRolloverSnapshot(null); }}
+        />
+      )}
+
+      {pendingImport && (
+        <ConfirmModal
+          theme={theme}
+          title="Restore from backup?"
+          body={(() => {
+            const pCount = pendingImport.payments?.length || 0;
+            const potCount = pendingImport.pots?.length || 0;
+            const date = pendingImport.exportedAt
+              ? new Date(pendingImport.exportedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+              : 'an unknown date';
+            return `This will replace your current data with ${pCount} payment${pCount === 1 ? '' : 's'} and ${potCount} pot${potCount === 1 ? '' : 's'} from your backup (${date}). This can't be undone.`;
+          })()}
+          confirmLabel="Restore"
+          onCancel={cancelImport}
+          onConfirm={confirmImport}
+        />
+      )}
+
+      {importError && (
+        <ConfirmModal
+          theme={theme}
+          title="Couldn't import"
+          body={importError}
+          confirmLabel="OK"
+          onCancel={() => setImportError(null)}
+          onConfirm={() => setImportError(null)}
         />
       )}
     </div>
@@ -902,11 +1091,292 @@ function Hero({ theme, totalLeft, totalPaid, progressPct, paidCount, totalCount,
   );
 }
 
+function AnnualView({ theme, cur, payments }) {
+  const [preset, setPreset] = useState('next12');
+  const [coverage, setCoverage] = useState('upcoming');
+  const today = new Date();
+  const yearAhead = new Date(today.getFullYear(), today.getMonth() + 12, today.getDate());
+  const [customFrom, setCustomFrom] = useState(today.toISOString().slice(0,10));
+  const [customTo, setCustomTo] = useState(yearAhead.toISOString().slice(0,10));
+
+  const range = (() => {
+    const t = new Date();
+    t.setHours(0,0,0,0);
+    if (preset === 'thisYear') {
+      const start = new Date(t.getFullYear(), 0, 1);
+      const end = new Date(t.getFullYear(), 11, 31);
+      return { start, end, label: `${t.getFullYear()}` };
+    }
+    if (preset === 'next12') {
+      const end = new Date(t.getFullYear(), t.getMonth() + 12, t.getDate() - 1);
+      return { start: t, end, label: 'Next 12 months' };
+    }
+    if (preset === 'next6') {
+      const end = new Date(t.getFullYear(), t.getMonth() + 6, t.getDate() - 1);
+      return { start: t, end, label: 'Next 6 months' };
+    }
+    if (preset === 'next3') {
+      const end = new Date(t.getFullYear(), t.getMonth() + 3, t.getDate() - 1);
+      return { start: t, end, label: 'Next 3 months' };
+    }
+    const start = new Date(customFrom + 'T00:00:00');
+    const end = new Date(customTo + 'T00:00:00');
+    return { start, end, label: 'Custom range' };
+  })();
+
+  const dayMs = 24 * 60 * 60 * 1000;
+  const rangeDays = Math.max(1, Math.round((range.end - range.start) / dayMs) + 1);
+
+  const occurrencesInWindow = (p) => {
+    const start = range.start;
+    const end = range.end;
+    if (!p.dueDate) return [];
+    const due = new Date(p.dueDate + 'T00:00:00');
+    if (!p.recurrence || p.recurrence === 'one-off') {
+      if (due >= start && due <= end) return [due];
+      return [];
+    }
+    const stepDays = { weekly: 7, fortnightly: 14, 'four-weekly': 28 };
+    const stepMonths = { monthly: 1, quarterly: 3, yearly: 12 };
+    const dates = [];
+    let cursor = new Date(due);
+    if (stepDays[p.recurrence]) {
+      const step = stepDays[p.recurrence];
+      if (cursor < start) {
+        const diffDays = Math.ceil((start - cursor) / dayMs);
+        const skip = Math.ceil(diffDays / step);
+        cursor = new Date(cursor.getTime() + skip * step * dayMs);
+      }
+      while (cursor <= end) {
+        if (cursor >= start) dates.push(new Date(cursor));
+        cursor = new Date(cursor.getTime() + step * dayMs);
+        if (dates.length > 500) break;
+      }
+    } else if (stepMonths[p.recurrence]) {
+      const monthsStep = stepMonths[p.recurrence];
+      while (cursor < start) {
+        cursor = new Date(cursor.getFullYear(), cursor.getMonth() + monthsStep, cursor.getDate());
+      }
+      while (cursor <= end) {
+        if (cursor >= start) dates.push(new Date(cursor));
+        cursor = new Date(cursor.getFullYear(), cursor.getMonth() + monthsStep, cursor.getDate());
+        if (dates.length > 500) break;
+      }
+    } else if (p.recurrence === 'custom' && p.customDay) {
+      let y = start.getFullYear();
+      let m = start.getMonth();
+      while (true) {
+        const d = new Date(y, m, Number(p.customDay));
+        if (d > end) break;
+        if (d >= start) dates.push(d);
+        m++;
+        if (m > 11) { m = 0; y++; }
+        if (dates.length > 500) break;
+      }
+    }
+    return dates;
+  };
+
+  const lines = payments.map(p => {
+    const all = occurrencesInWindow(p);
+    const t = new Date();
+    t.setHours(0,0,0,0);
+    const filtered = coverage === 'all' ? all : all.filter(d => {
+      if (p.recurrence === 'one-off' && p.paid) return false;
+      return d >= t;
+    });
+    const count = filtered.length;
+    const total = count * Number(p.amount || 0);
+    return { p, count, total };
+  }).filter(l => l.count > 0)
+    .sort((a, b) => b.total - a.total);
+
+  const grandTotal = lines.reduce((s, l) => s + l.total, 0);
+  const monthsInRange = rangeDays / 30.44;
+  const monthlyAvg = monthsInRange > 0 ? grandTotal / monthsInRange : 0;
+  const weeklyAvg = rangeDays > 0 ? (grandTotal / rangeDays) * 7 : 0;
+  const dailyAvg = rangeDays > 0 ? grandTotal / rangeDays : 0;
+
+  const formatDate = (d) => d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+
+  const presetButton = (key, label) => (
+    <button onClick={() => setPreset(key)} style={{
+      padding: '8px 12px',
+      background: preset === key ? theme.accentSoft : 'transparent',
+      color: preset === key ? theme.text : theme.textMuted,
+      border: `1px solid ${preset === key ? theme.accent : theme.border}`,
+      borderRadius: 999, fontSize: 12, fontWeight: 500, fontFamily: 'inherit',
+      cursor: 'pointer', transition: 'all 0.2s ease',
+      whiteSpace: 'nowrap'
+    }}>{label}</button>
+  );
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+        {presetButton('thisYear', 'This year')}
+        {presetButton('next12', 'Next 12 months')}
+        {presetButton('next6', 'Next 6 months')}
+        {presetButton('next3', 'Next 3 months')}
+        {presetButton('custom', 'Custom')}
+      </div>
+
+      {preset === 'custom' && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 11, color: theme.textMuted, marginBottom: 4, paddingLeft: 2 }}>From</div>
+            <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)} style={{
+              width: '100%', padding: '10px 12px',
+              background: theme.surface, color: theme.text,
+              border: `1px solid ${theme.border}`, borderRadius: 10,
+              fontSize: 14, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box'
+            }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 11, color: theme.textMuted, marginBottom: 4, paddingLeft: 2 }}>To</div>
+            <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)} style={{
+              width: '100%', padding: '10px 12px',
+              background: theme.surface, color: theme.text,
+              border: `1px solid ${theme.border}`, borderRadius: 10,
+              fontSize: 14, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box'
+            }} />
+          </div>
+        </div>
+      )}
+
+      <div style={{
+        display: 'flex', gap: 4, padding: 4,
+        background: theme.surface, border: `1px solid ${theme.border}`,
+        borderRadius: 12, marginBottom: 16
+      }}>
+        <button onClick={() => setCoverage('upcoming')} style={{
+          flex: 1, padding: '8px 10px',
+          background: coverage === 'upcoming' ? theme.accentSoft : 'transparent',
+          color: coverage === 'upcoming' ? theme.text : theme.textMuted,
+          border: 'none', borderRadius: 9,
+          fontSize: 13, fontWeight: 500, fontFamily: 'inherit',
+          cursor: 'pointer', transition: 'all 0.2s ease'
+        }}>Upcoming only</button>
+        <button onClick={() => setCoverage('all')} style={{
+          flex: 1, padding: '8px 10px',
+          background: coverage === 'all' ? theme.accentSoft : 'transparent',
+          color: coverage === 'all' ? theme.text : theme.textMuted,
+          border: 'none', borderRadius: 9,
+          fontSize: 13, fontWeight: 500, fontFamily: 'inherit',
+          cursor: 'pointer', transition: 'all 0.2s ease'
+        }}>All payments</button>
+      </div>
+
+      <div style={{
+        background: theme.surface, border: `1px solid ${theme.border}`,
+        borderRadius: 20, padding: '24px 22px', marginBottom: 12,
+        boxShadow: theme.shadow
+      }}>
+        <div style={{ fontSize: 13, color: theme.textMuted, marginBottom: 6 }}>
+          {coverage === 'upcoming' ? 'Coming up' : 'In this period'}
+          {preset === 'custom' && lines.length > 0 && (
+            <span style={{ color: theme.textFaint }}> · {formatDate(range.start)} – {formatDate(range.end)}</span>
+          )}
+        </div>
+        <div style={{
+          fontFamily: "'Fraunces', Georgia, serif",
+          fontSize: 44, fontWeight: 400, lineHeight: 1,
+          letterSpacing: '-0.03em',
+          color: theme.text,
+          marginBottom: 16,
+          fontFeatureSettings: '"tnum"'
+        }}>
+          {fmtMoney(grandTotal, cur)}
+        </div>
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 1,
+          background: theme.divider, borderRadius: 10, overflow: 'hidden',
+          border: `1px solid ${theme.divider}`
+        }}>
+          {[
+            { label: 'per month', value: monthlyAvg },
+            { label: 'per week', value: weeklyAvg },
+            { label: 'per day', value: dailyAvg }
+          ].map((item, i) => (
+            <div key={i} style={{
+              background: theme.surface, padding: '10px 8px', textAlign: 'center'
+            }}>
+              <div style={{ fontSize: 11, color: theme.textFaint, letterSpacing: '0.02em', marginBottom: 2 }}>{item.label}</div>
+              <div style={{
+                fontFamily: "'Fraunces', serif", fontStyle: 'italic',
+                fontSize: 15, color: theme.text,
+                fontFeatureSettings: '"tnum"'
+              }}>{fmtMoney(item.value, cur)}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {lines.length === 0 ? (
+        <div style={{
+          padding: '40px 24px', textAlign: 'center',
+          background: theme.surface, border: `1px solid ${theme.border}`,
+          borderRadius: 20
+        }}>
+          <div style={{
+            fontFamily: "'Fraunces', serif", fontStyle: 'italic',
+            fontSize: 18, color: theme.text, marginBottom: 6
+          }}>Nothing in this period.</div>
+          <div style={{ fontSize: 13, color: theme.textMuted, lineHeight: 1.5 }}>
+            {coverage === 'upcoming' ? 'No payments coming up in this range.' : 'No payments fall in this range.'}
+          </div>
+        </div>
+      ) : (
+        <div style={{
+          background: theme.surface, border: `1px solid ${theme.border}`,
+          borderRadius: 16, overflow: 'hidden'
+        }}>
+          <div style={{
+            padding: '12px 16px',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            borderBottom: `1px solid ${theme.divider}`,
+            fontSize: 11, fontWeight: 600, color: theme.textMuted,
+            letterSpacing: '0.12em', textTransform: 'uppercase'
+          }}>
+            <span>Breakdown</span>
+            <span>{lines.length} payment{lines.length === 1 ? '' : 's'}</span>
+          </div>
+          {lines.map(({ p, count, total }, i) => (
+            <div key={p.id} style={{
+              padding: '14px 16px',
+              display: 'flex', alignItems: 'center', gap: 12,
+              borderBottom: i < lines.length - 1 ? `1px solid ${theme.divider}` : 'none'
+            }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{
+                  fontSize: 14, fontWeight: 500, color: theme.text,
+                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                  marginBottom: 2
+                }}>{p.name}</div>
+                <div style={{ fontSize: 12, color: theme.textMuted }}>
+                  {fmtMoney(p.amount, cur)} {p.recurrence !== 'one-off' && `· ${count}×`}
+                </div>
+              </div>
+              <div style={{
+                fontFamily: "'Fraunces', serif",
+                fontSize: 16, color: theme.text,
+                fontFeatureSettings: '"tnum"',
+                whiteSpace: 'nowrap'
+              }}>{fmtMoney(total, cur)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FilterTabs({ theme, value, onChange, showPots }) {
   const tabs = [
     { key: 'all', label: 'All' },
     { key: 'recurring', label: 'Recurring' },
-    { key: 'one-off', label: 'One-off' }
+    { key: 'one-off', label: 'One-off' },
+    { key: 'annual', label: 'Annual' }
   ];
   if (showPots) tabs.push({ key: 'pots', label: 'Pots' });
   return (
@@ -1151,7 +1621,7 @@ function PotLedger({ pot, theme, cur, onRename, onDelete, onReset, onAdd, onRemo
 }
 
 
-function PaymentRow({ p, theme, cur, onToggle, onEdit, onDelete }) {
+function PaymentRow({ p, theme, cur, onToggle, onEdit, onDelete, onDuplicate }) {
   const status = getStatus(p);
   const [swipe, setSwipe] = useState(0);
   const [revealed, setRevealed] = useState(false);
@@ -1167,6 +1637,8 @@ function PaymentRow({ p, theme, cur, onToggle, onEdit, onDelete }) {
     soon: theme.amberSoft, upcoming: 'transparent'
   }[status];
 
+  const REVEAL_WIDTH = 160; // wider so it fits Duplicate + Delete
+
   const onTouchStart = (e) => {
     touchRef.current = {
       x: e.touches[0].clientX, y: e.touches[0].clientY, moved: false, active: true
@@ -1178,13 +1650,13 @@ function PaymentRow({ p, theme, cur, onToggle, onEdit, onDelete }) {
     const dy = e.touches[0].clientY - touchRef.current.y;
     if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 8) {
       touchRef.current.moved = true;
-      setSwipe(Math.max(-100, Math.min(10, dx)));
+      setSwipe(Math.max(-REVEAL_WIDTH - 20, Math.min(10, dx)));
     }
   };
   const onTouchEnd = () => {
-    if (touchRef.current.moved && swipe <= -60) {
+    if (touchRef.current.moved && swipe <= -REVEAL_WIDTH * 0.6) {
       setRevealed(true);
-      setSwipe(-80);
+      setSwipe(-REVEAL_WIDTH);
     } else {
       setRevealed(false);
       setSwipe(0);
@@ -1198,18 +1670,33 @@ function PaymentRow({ p, theme, cur, onToggle, onEdit, onDelete }) {
     onEdit();
   };
 
+  const close = () => { setRevealed(false); setSwipe(0); };
+
   return (
     <div style={{ position: 'relative', borderRadius: 16, overflow: 'hidden' }}>
       <div style={{
         position: 'absolute', inset: 0,
-        display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
-        paddingRight: 20, background: theme.redSoft, borderRadius: 16
+        display: 'flex', alignItems: 'stretch', justifyContent: 'flex-end',
+        background: 'transparent', borderRadius: 16
       }}>
-        <button onClick={(e) => { e.stopPropagation(); onDelete(); }} style={{
-          background: 'transparent', color: theme.red, border: 'none',
-          fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
-          padding: '8px 4px'
-        }}>Delete</button>
+        {onDuplicate && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onDuplicate(); close(); }}
+            style={{
+              width: 80,
+              background: theme.accentSoft, color: theme.accent, border: 'none',
+              fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+              display: 'flex', alignItems: 'center', justifyContent: 'center'
+            }}>Duplicate</button>
+        )}
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          style={{
+            width: 80,
+            background: theme.redSoft, color: theme.red, border: 'none',
+            fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+            borderTopRightRadius: 16, borderBottomRightRadius: 16
+          }}>Delete</button>
       </div>
 
       <div
@@ -1487,7 +1974,7 @@ function PaymentModal({ theme, cur, editing, skipNonWorking, onCancel, onSave, o
   );
 }
 
-function SettingsModal({ theme, themeName, onSelectTheme, currency, onSelectCurrency, skipNonWorking, onToggleSkipNonWorking, potsEnabled, onTogglePotsEnabled, pots, cur, onRenamePot, onDeletePot, onClose }) {
+function SettingsModal({ theme, themeName, onSelectTheme, currency, onSelectCurrency, skipNonWorking, onToggleSkipNonWorking, potsEnabled, onTogglePotsEnabled, pots, cur, onRenamePot, onDeletePot, onExport, onImport, onClose }) {
   const [pendingDelete, setPendingDelete] = useState(null);
   const [renamingId, setRenamingId] = useState(null);
   const [renameValue, setRenameValue] = useState('');
@@ -1656,6 +2143,61 @@ function SettingsModal({ theme, themeName, onSelectTheme, currency, onSelectCurr
             You've no pots yet. Pop over to the Pots tab to create your first one.
           </div>
         )}
+
+        {/* Backup section */}
+        <div style={{
+          marginTop: 28, paddingTop: 20, borderTop: `1px solid ${theme.divider}`
+        }}>
+          <div style={{
+            fontSize: 11, fontWeight: 600, color: theme.textMuted,
+            letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 12
+          }}>Backup</div>
+          <div style={{
+            fontSize: 13, color: theme.textMuted, lineHeight: 1.55, marginBottom: 14
+          }}>
+            Tally keeps your data on this device only. Save a backup file to keep it safe or to move to another phone.
+          </div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button onClick={onExport} style={{
+              flex: 1, padding: '12px 14px',
+              background: theme.bg, color: theme.text,
+              border: `1px solid ${theme.border}`, borderRadius: 12,
+              fontSize: 14, fontWeight: 500, fontFamily: 'inherit',
+              cursor: 'pointer', transition: 'all 0.2s ease',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8
+            }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              Save backup
+            </button>
+            <label style={{
+              flex: 1, padding: '12px 14px',
+              background: theme.bg, color: theme.text,
+              border: `1px solid ${theme.border}`, borderRadius: 12,
+              fontSize: 14, fontWeight: 500, fontFamily: 'inherit',
+              cursor: 'pointer', transition: 'all 0.2s ease',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8
+            }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              Restore
+              <input type="file" accept=".json,application/json"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  if (e.target.files && e.target.files[0]) {
+                    onImport(e.target.files[0]);
+                    e.target.value = '';
+                  }
+                }} />
+            </label>
+          </div>
+        </div>
 
         <div style={{
           marginTop: 28, paddingTop: 20, borderTop: `1px solid ${theme.divider}`,
