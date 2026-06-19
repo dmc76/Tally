@@ -56,7 +56,7 @@
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-  <script type="text/babel" data-type="module">
+  <script type="text/babel">
   const { useState, useEffect, useRef } = React;
 
 
@@ -1609,7 +1609,7 @@ function PotLedger({ pot, theme, cur, onRename, onDelete, onReset, onAdd, onRemo
       {confirmDel && (
         <ConfirmModal
           theme={theme}
-          title={`Delete ‘${pot.name}’?`}
+          title={`Delete '${pot.name}'?`}
           body="This will remove the pot and its history. This can't be undone."
           confirmLabel="Delete pot"
           onCancel={() => setConfirmDel(false)}
@@ -2211,7 +2211,7 @@ function SettingsModal({ theme, themeName, onSelectTheme, currency, onSelectCurr
       {pendingDelete && (
         <ConfirmModal
           theme={theme}
-          title={`Delete ‘${pendingDelete.name}’?`}
+          title={`Delete '${pendingDelete.name}'?`}
           body="Any payments in this pot will go back to outstanding. This can't be undone."
           confirmLabel="Delete pot"
           onCancel={() => setPendingDelete(null)}
