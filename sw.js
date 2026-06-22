@@ -1,5 +1,5 @@
 // Tally service worker — cache-first app shell, network-first for CDN
-const CACHE_NAME = 'tally-v8';
+const CACHE_NAME = 'tally-v9';
 const APP_SHELL = [
   './',
   './index.html',
@@ -11,7 +11,6 @@ const APP_SHELL = [
   './icons/icon-maskable-512.png',
   './icons/favicon-32.png'
 ];
-
 // Install: pre-cache the app shell
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -19,7 +18,6 @@ self.addEventListener('install', (event) => {
   );
   self.skipWaiting();
 });
-
 // Activate: clean up old caches
 self.addEventListener('activate', (event) => {
   event.waitUntil(
@@ -31,7 +29,6 @@ self.addEventListener('activate', (event) => {
   );
   self.clients.claim();
 });
-
 // Fetch strategy:
 // - Navigation requests -> network first, fall back to cached index.html
 // - CDN/font assets -> cache-first with background refresh
@@ -39,7 +36,6 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET') return;
-
   const url = new URL(request.url);
   const isNavigation = request.mode === 'navigate';
   const isCDN =
@@ -47,14 +43,12 @@ self.addEventListener('fetch', (event) => {
     url.hostname === 'fonts.gstatic.com' ||
     url.hostname === 'unpkg.com' ||
     url.hostname === 'cdn.jsdelivr.net';
-
   if (isNavigation) {
     event.respondWith(
       fetch(request).catch(() => caches.match('./index.html'))
     );
     return;
   }
-
   if (isCDN) {
     event.respondWith(
       caches.match(request).then((cached) => {
@@ -70,7 +64,6 @@ self.addEventListener('fetch', (event) => {
     );
     return;
   }
-
   event.respondWith(
     caches.match(request).then((cached) => cached || fetch(request))
   );

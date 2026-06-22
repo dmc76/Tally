@@ -304,40 +304,82 @@ function Tally() {
   const [rolloverSnapshot, setRolloverSnapshot] = useState(null);
   const [calcOpen, setCalcOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  // Tracks whether we successfully loaded a real payments list this session.
+  // Used to stop the save effect from ever clobbering good data with an
+  // empty array if loading failed or hasn't finished yet.
+  const paymentsLoadedRef = useRef(false);
 
   // Load
   useEffect(() => {
     (async () => {
       try {
         const p = await storage.get('tally-payments');
+        const backupP = await storage.get('tally-payments-backup');
         const pts = await storage.get('tally-pots');
         const t = await storage.get('tally-theme');
         const c = await storage.get('tally-currency');
         const s = await storage.get('tally-skip-non-working');
         const pe = await storage.get('tally-pots-enabled');
+        let migratedPayments = null;
         if (p) {
           try {
             const parsed = JSON.parse(p);
             // Migrate: strip legacy pot-coupling fields so payments are just payments
-            const migrated = parsed.map(pay => {
+            migratedPayments = parsed.map(pay => {
               const { potId, topupPotId, type, ...rest } = pay;
               return rest;
             });
-            setPayments(migrated);
           } catch {}
         }
+        // Safety net: if the primary key is empty/missing/corrupt but a
+        // rolling backup exists with real entries, recover from that instead
+        // of silently treating the account as empty.
+        if ((!migratedPayments || migratedPayments.length === 0) && backupP) {
+          try {
+            const parsedBackup = JSON.parse(backupP);
+            if (Array.isArray(parsedBackup) && parsedBackup.length > 0) {
+              migratedPayments = parsedBackup.map(pay => {
+                const { potId, topupPotId, type, ...rest } = pay;
+                return rest;
+              });
+            }
+          } catch {}
+        }
+        if (migratedPayments) {
+          setPayments(migratedPayments);
+          paymentsLoadedRef.current = true;
+        } else {
+          // Nothing in storage at all (genuinely brand new) — safe to treat as loaded.
+          paymentsLoadedRef.current = true;
+        }
+        let migratedPots = null;
         if (pts) {
           try {
             const parsed = JSON.parse(pts);
             // Migrate: ensure every pot has a balance + transactions array
-            const migrated = parsed.map(pot => ({
+            migratedPots = parsed.map(pot => ({
               ...pot,
               balance: typeof pot.balance === 'number' ? pot.balance : 0,
               transactions: Array.isArray(pot.transactions) ? pot.transactions : []
             }));
-            setPots(migrated);
           } catch {}
         }
+        if ((!migratedPots || migratedPots.length === 0)) {
+          const backupPts = await storage.get('tally-pots-backup');
+          if (backupPts) {
+            try {
+              const parsedBackup = JSON.parse(backupPts);
+              if (Array.isArray(parsedBackup) && parsedBackup.length > 0) {
+                migratedPots = parsedBackup.map(pot => ({
+                  ...pot,
+                  balance: typeof pot.balance === 'number' ? pot.balance : 0,
+                  transactions: Array.isArray(pot.transactions) ? pot.transactions : []
+                }));
+              }
+            } catch {}
+          }
+        }
+        if (migratedPots) setPots(migratedPots);
         if (t && THEMES[t]) setThemeName(t);
         if (c && CURRENCIES[c]) setCurrency(c);
         if (s !== null && s !== undefined) setSkipNonWorking(s === 'true' || s === true);
@@ -349,8 +391,28 @@ function Tally() {
   }, []);
 
   // Save
-  useEffect(() => { if (loaded) storage.set('tally-payments', JSON.stringify(payments)); }, [payments, loaded]);
-  useEffect(() => { if (loaded) storage.set('tally-pots', JSON.stringify(pots)); }, [pots, loaded]);
+  useEffect(() => {
+    if (!loaded) return;
+    // Refuse to persist an empty payments list unless we know it's genuinely
+    // intentional (we successfully loaded — even if that load found nothing —
+    // before allowing a save). This is the guard against the historical bug
+    // where a failed/partial load could silently overwrite real data with [].
+    if (!paymentsLoadedRef.current) return;
+    storage.set('tally-payments', JSON.stringify(payments));
+    // Maintain a rolling backup of the last known-good non-empty list.
+    // This key is never overwritten with an empty array, so it always
+    // holds a recovery point even if the primary key is ever corrupted.
+    if (payments.length > 0) {
+      storage.set('tally-payments-backup', JSON.stringify(payments));
+    }
+  }, [payments, loaded]);
+  useEffect(() => {
+    if (!loaded) return;
+    storage.set('tally-pots', JSON.stringify(pots));
+    if (pots.length > 0) {
+      storage.set('tally-pots-backup', JSON.stringify(pots));
+    }
+  }, [pots, loaded]);
   useEffect(() => { if (loaded) storage.set('tally-theme', themeName); }, [themeName, loaded]);
   useEffect(() => { if (loaded) storage.set('tally-currency', currency); }, [currency, loaded]);
   useEffect(() => { if (loaded) storage.set('tally-skip-non-working', String(skipNonWorking)); }, [skipNonWorking, loaded]);
