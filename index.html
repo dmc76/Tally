@@ -2983,10 +2983,49 @@ const SettingsIcon = () => (
 );
 
   // ============================================================
+  // DEBUG VIEW — read-only, never writes anything.
+  // Visit tally.littleappstudio.co.uk/?debug=storage to see this.
+  // ============================================================
+  const StorageDebugView = () => {
+    const keys = ['tally-payments', 'tally-payments-backup', 'tally-pots', 'tally-pots-backup', 'tally-theme', 'tally-currency'];
+    const rows = keys.map(k => {
+      let raw = null;
+      try { raw = localStorage.getItem(k); } catch (e) { raw = `<error reading: ${e.message}>`; }
+      let count = '';
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) count = ` (${parsed.length} item${parsed.length === 1 ? '' : 's'})`;
+        } catch (e) {}
+      }
+      return { key: k, raw, count };
+    });
+    let hasWindowStorage = 'unknown';
+    try { hasWindowStorage = String(typeof window !== 'undefined' && !!window.storage); } catch (e) {}
+    return (
+      <div style={{ fontFamily: 'monospace', padding: 16, background: '#111', color: '#eee', minHeight: '100vh', fontSize: 13, lineHeight: 1.5 }}>
+        <h2 style={{ color: '#fff' }}>Tally storage debug (read-only)</h2>
+        <p>window.storage present: <b>{hasWindowStorage}</b></p>
+        <p>Page origin: <b>{typeof location !== 'undefined' ? location.origin : 'unknown'}</b></p>
+        {rows.map(r => (
+          <div key={r.key} style={{ marginBottom: 14, padding: 10, background: '#222', borderRadius: 6 }}>
+            <div style={{ color: '#7dd3fc', fontWeight: 'bold' }}>{r.key}{r.count}</div>
+            <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: r.raw ? '#eee' : '#f87171', marginTop: 4 }}>
+              {r.raw === null ? 'null (key does not exist)' : r.raw}
+            </div>
+          </div>
+        ))}
+        <p style={{ color: '#999', marginTop: 20 }}>This page only reads localStorage. It has not changed or deleted anything.</p>
+      </div>
+    );
+  };
+
+  // ============================================================
   // MOUNT
   // ============================================================
   const root = ReactDOM.createRoot(document.getElementById('root'));
-  root.render(<Tally />);
+  const isDebug = typeof location !== 'undefined' && new URLSearchParams(location.search).get('debug') === 'storage';
+  root.render(isDebug ? <StorageDebugView /> : <Tally />);
   </script>
 
   <script>
