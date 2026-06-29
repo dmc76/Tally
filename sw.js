@@ -1,5 +1,5 @@
 // Tally service worker — cache-first app shell, network-first for CDN
-const CACHE_NAME = 'tally-v10';
+const CACHE_NAME = 'tally-v11';
 const APP_SHELL = [
   './',
   './index.html',

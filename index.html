@@ -3001,12 +3001,51 @@ const SettingsIcon = () => (
       return { key: k, raw, count };
     });
     let hasWindowStorage = 'unknown';
-    try { hasWindowStorage = String(typeof window !== 'undefined' && !!window.storage); } catch (e) {}
+    let storageDetails = '';
+    try {
+      hasWindowStorage = String(typeof window !== 'undefined' && !!window.storage);
+      if (typeof window !== 'undefined' && window.storage) {
+        const keysOnIt = Object.keys(window.storage);
+        const proto = Object.getPrototypeOf(window.storage);
+        const protoMethods = proto ? Object.getOwnPropertyNames(proto) : [];
+        storageDetails = 'typeof: ' + typeof window.storage + '\n';
+        storageDetails += 'own keys: ' + JSON.stringify(keysOnIt) + '\n';
+        storageDetails += 'prototype methods: ' + JSON.stringify(protoMethods) + '\n';
+        storageDetails += 'constructor name: ' + (window.storage.constructor ? window.storage.constructor.name : 'n/a') + '\n';
+        storageDetails += 'toString: ' + String(window.storage) + '\n';
+        try {
+          storageDetails += 'JSON.stringify: ' + JSON.stringify(window.storage) + '\n';
+        } catch (e) { storageDetails += 'JSON.stringify failed: ' + e.message + '\n'; }
+      }
+    } catch (e) { storageDetails = 'error inspecting: ' + e.message; }
+    const [liveGetResult, setLiveGetResult] = React.useState('pending...');
+    React.useEffect(() => {
+      (async () => {
+        try {
+          if (window.storage && window.storage.get) {
+            const r = await window.storage.get('tally-payments');
+            setLiveGetResult(JSON.stringify(r));
+          } else {
+            setLiveGetResult('window.storage.get not a function');
+          }
+        } catch (e) {
+          setLiveGetResult('error calling window.storage.get: ' + e.message);
+        }
+      })();
+    }, []);
     return (
       <div style={{ fontFamily: 'monospace', padding: 16, background: '#111', color: '#eee', minHeight: '100vh', fontSize: 13, lineHeight: 1.5 }}>
         <h2 style={{ color: '#fff' }}>Tally storage debug (read-only)</h2>
         <p>window.storage present: <b>{hasWindowStorage}</b></p>
         <p>Page origin: <b>{typeof location !== 'undefined' ? location.origin : 'unknown'}</b></p>
+        <div style={{ marginBottom: 14, padding: 10, background: '#222', borderRadius: 6 }}>
+          <div style={{ color: '#fbbf24', fontWeight: 'bold' }}>window.storage inspection</div>
+          <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', marginTop: 4 }}>{storageDetails || '(none)'}</div>
+        </div>
+        <div style={{ marginBottom: 14, padding: 10, background: '#222', borderRadius: 6 }}>
+          <div style={{ color: '#fbbf24', fontWeight: 'bold' }}>window.storage.get('tally-payments') result</div>
+          <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', marginTop: 4 }}>{liveGetResult}</div>
+        </div>
         {rows.map(r => (
           <div key={r.key} style={{ marginBottom: 14, padding: 10, background: '#222', borderRadius: 6 }}>
             <div style={{ color: '#7dd3fc', fontWeight: 'bold' }}>{r.key}{r.count}</div>
