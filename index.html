@@ -137,21 +137,9 @@ const nextPotColor = (pots) => POT_COLORS[pots.length % POT_COLORS.length].id;
 // ============================================================
 const storage = {
   async get(key) {
-    try {
-      if (typeof window !== 'undefined' && window.storage && window.storage.get) {
-        const r = await window.storage.get(key);
-        return r && r.value ? r.value : null;
-      }
-    } catch (e) {}
     try { return typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null; } catch { return null; }
   },
   async set(key, value) {
-    try {
-      if (typeof window !== 'undefined' && window.storage && window.storage.set) {
-        await window.storage.set(key, value);
-        return;
-      }
-    } catch (e) {}
     try { if (typeof localStorage !== 'undefined') localStorage.setItem(key, value); } catch {}
   }
 };
