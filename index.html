@@ -236,6 +236,44 @@ const nextDueDate = (currentISO, recurrence, customDay, skipNonWorking = true) =
   return skipNonWorking ? adjustToWorkingDay(iso) : iso;
 };
 
+// ============================================================
+// SUB-MONTHLY PAYMENTS (weekly / fortnightly / four-weekly)
+// These recur multiple times within a calendar month, so they
+// roll over instantly on tick (not at monthly reset), and their
+// contribution to "left to pay" is amount × occurrences left
+// between their current due date and the end of this month.
+// ============================================================
+const SUB_MONTHLY = ['weekly', 'fortnightly', 'four-weekly'];
+const isSubMonthly = (recurrence) => SUB_MONTHLY.includes(recurrence);
+
+const endOfMonthISO = () => {
+  const now = new Date();
+  return toISO(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+};
+
+const startOfMonthISO = () => {
+  const now = new Date();
+  return toISO(new Date(now.getFullYear(), now.getMonth(), 1));
+};
+
+// Count how many times a sub-monthly payment falls due on or before
+// the last day of the current calendar month, starting from its
+// current due date. Overdue occurrences (due date in the past) count
+// too — they're still owed. Uses nextDueDate() for stepping so the
+// count matches exactly what the app will do on each tick, including
+// working-day adjustment.
+const occurrencesLeftThisMonth = (p, skipNonWorking = true) => {
+  if (!isSubMonthly(p.recurrence) || !p.dueDate) return 0;
+  const monthEnd = endOfMonthISO();
+  let cursor = p.dueDate;
+  let count = 0;
+  while (cursor && cursor <= monthEnd && count < 40) {
+    count++;
+    cursor = nextDueDate(cursor, p.recurrence, p.customDay, skipNonWorking);
+  }
+  return count;
+};
+
 const friendlyDate = (iso) => {
   if (!iso) return '';
   const days = daysUntil(iso);
@@ -290,6 +328,13 @@ function Tally() {
   const [transactionForPot, setTransactionForPot] = useState(null); // { potId, direction: 'in'|'out' }
   const [resetForPot, setResetForPot] = useState(null); // pot id awaiting reset confirmation
   const [rolloverSnapshot, setRolloverSnapshot] = useState(null);
+  // Log of sub-monthly (weekly/fortnightly/four-weekly) tick-offs.
+  // These payments roll straight over to their next date when ticked,
+  // so this log is the record that they were paid — it feeds the
+  // "Paid" figure, the Paid section, and the rollover summary.
+  // Entries: { id, paymentId, name, amount, date, prevDueDate, newDueDate }
+  const [paidLog, setPaidLog] = useState([]);
+  const [undoToast, setUndoToast] = useState(null); // { entry } — shown briefly after a sub-monthly tick
   const [calcOpen, setCalcOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
   // Tracks whether we successfully loaded a real payments list this session.
@@ -308,6 +353,8 @@ function Tally() {
         const c = await storage.get('tally-currency');
         const s = await storage.get('tally-skip-non-working');
         const pe = await storage.get('tally-pots-enabled');
+        const log = await storage.get('tally-paid-log');
+        const skip = (s !== null && s !== undefined) ? (s === 'true' || s === true) : true;
         let migratedPayments = null;
         if (p) {
           try {
@@ -333,6 +380,40 @@ function Tally() {
             }
           } catch {}
         }
+        // Load the sub-monthly paid log, dropping anything over two
+        // months old so the key never grows unbounded.
+        let loadedLog = [];
+        if (log) {
+          try {
+            const parsedLog = JSON.parse(log);
+            if (Array.isArray(parsedLog)) {
+              const cutoff = toISO(new Date(Date.now() - 62 * 86400000));
+              loadedLog = parsedLog.filter(e => e && e.date && e.date >= cutoff);
+            }
+          } catch {}
+        }
+        // Migrate: under the old model a weekly/fortnightly/four-weekly
+        // payment could sit ticked-off as paid until monthly reset. Under
+        // the new model those roll over instantly, so convert any lingering
+        // paid sub-monthly rows: log the payment, advance the due date,
+        // clear the paid flag.
+        if (migratedPayments) {
+          migratedPayments = migratedPayments.map(pay => {
+            if (!pay.paid || !isSubMonthly(pay.recurrence)) return pay;
+            const newDue = nextDueDate(pay.dueDate, pay.recurrence, pay.customDay, skip) || pay.dueDate;
+            loadedLog = [{
+              id: `log_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
+              paymentId: pay.id,
+              name: pay.name,
+              amount: Number(pay.amount) || 0,
+              date: pay.paidDate || todayISO(),
+              prevDueDate: pay.dueDate,
+              newDueDate: newDue
+            }, ...loadedLog];
+            return { ...pay, paid: false, paidDate: undefined, dueDate: newDue };
+          });
+        }
+        setPaidLog(loadedLog);
         if (migratedPayments) {
           setPayments(migratedPayments);
           paymentsLoadedRef.current = true;
@@ -401,6 +482,10 @@ function Tally() {
       storage.set('tally-pots-backup', JSON.stringify(pots));
     }
   }, [pots, loaded]);
+  useEffect(() => {
+    if (!loaded) return;
+    storage.set('tally-paid-log', JSON.stringify(paidLog));
+  }, [paidLog, loaded]);
   useEffect(() => { if (loaded) storage.set('tally-theme', themeName); }, [themeName, loaded]);
   useEffect(() => { if (loaded) storage.set('tally-currency', currency); }, [currency, loaded]);
   useEffect(() => { if (loaded) storage.set('tally-skip-non-working', String(skipNonWorking)); }, [skipNonWorking, loaded]);
@@ -440,12 +525,40 @@ function Tally() {
     if (!potsEnabled && filter === 'pots') setFilter('all');
   }, [potsEnabled, filter]);
 
-  const totalLeft = filtered.filter(p => !p.paid).reduce((s, p) => s + Number(p.amount || 0), 0);
-  const totalPaid = filtered.filter(p => p.paid).reduce((s, p) => s + Number(p.amount || 0), 0);
+  // Sub-monthly payments contribute amount × occurrences left before the
+  // end of the current calendar month (their due date self-advances on
+  // each tick, so the count comes down naturally as they're paid).
+  // Everything else contributes its amount once, if unpaid — as before.
+  const occLeftFor = (p) => occurrencesLeftThisMonth(p, skipNonWorking);
+  const totalLeft = filtered.reduce((s, p) => {
+    if (isSubMonthly(p.recurrence)) return s + Number(p.amount || 0) * occLeftFor(p);
+    return p.paid ? s : s + Number(p.amount || 0);
+  }, 0);
+
+  // Sub-monthly tick-offs live in the paid log, scoped to the current
+  // calendar month. They're recurring by definition, so they never show
+  // on the One-off tab; they respect the search filter like rows do.
+  const monthStart = startOfMonthISO();
+  const logThisMonth = paidLog.filter(e => {
+    if (e.date < monthStart) return false;
+    if (filter === 'one-off' || filter === 'pots' || filter === 'annual') return false;
+    if (searchTerm.trim()) {
+      const q = searchTerm.trim().toLowerCase();
+      if (!(e.name || '').toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
+
+  const totalPaid = filtered.filter(p => p.paid).reduce((s, p) => s + Number(p.amount || 0), 0)
+    + logThisMonth.reduce((s, e) => s + Number(e.amount || 0), 0);
   const totalAll = totalLeft + totalPaid;
   const progressPct = totalAll > 0 ? (totalPaid / totalAll) * 100 : 0;
-  const paidCount = filtered.filter(p => p.paid).length;
-  const allPaid = filtered.length > 0 && paidCount === filtered.length;
+  const paidCount = filtered.filter(p => p.paid).length + logThisMonth.length;
+  // "of Y" counts occurrences, not rows: a weekly payment with 3 ticks
+  // left this month is 3 items, and its past ticks are counted via the log.
+  const totalCount = filtered.reduce((s, p) => s + (isSubMonthly(p.recurrence) ? occLeftFor(p) : 1), 0)
+    + logThisMonth.length;
+  const allPaid = totalCount > 0 && paidCount === totalCount;
 
   // Grouped
   const overdue = filtered.filter(p => !p.paid && getStatus(p) === 'overdue').sort((a,b) => a.dueDate.localeCompare(b.dueDate));
@@ -455,11 +568,54 @@ function Tally() {
 
   // Actions — payments
   const togglePaid = (id) => {
-    setPayments(ps => ps.map(p => p.id === id
-      ? { ...p, paid: !p.paid, paidDate: !p.paid ? todayISO() : undefined }
-      : p
+    const p = payments.find(x => x.id === id);
+    if (!p) return;
+    // Sub-monthly payments roll straight over: log the occurrence,
+    // advance the due date, keep the row unpaid on its new date.
+    // The paid flag is never set — the log is the record.
+    if (isSubMonthly(p.recurrence)) {
+      const newDue = nextDueDate(p.dueDate, p.recurrence, p.customDay, skipNonWorking) || p.dueDate;
+      const entry = {
+        id: `log_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,
+        paymentId: p.id,
+        name: p.name,
+        amount: Number(p.amount) || 0,
+        date: todayISO(),
+        prevDueDate: p.dueDate,
+        newDueDate: newDue
+      };
+      setPaidLog(l => [entry, ...l]);
+      setPayments(ps => ps.map(x => x.id === id ? { ...x, dueDate: newDue } : x));
+      setUndoToast({ entry });
+      return;
+    }
+    setPayments(ps => ps.map(x => x.id === id
+      ? { ...x, paid: !x.paid, paidDate: !x.paid ? todayISO() : undefined }
+      : x
     ));
   };
+
+  // Reverse a sub-monthly tick: remove the log entry and step the due
+  // date back — but only if it hasn't been manually changed since (we
+  // check the stored newDueDate matches before restoring).
+  const removeLogEntry = (logId) => {
+    const entry = paidLog.find(e => e.id === logId);
+    if (!entry) return;
+    setPaidLog(l => l.filter(e => e.id !== logId));
+    setPayments(ps => ps.map(p =>
+      (p.id === entry.paymentId && p.dueDate === entry.newDueDate)
+        ? { ...p, dueDate: entry.prevDueDate }
+        : p
+    ));
+    setUndoToast(t => (t && t.entry.id === logId) ? null : t);
+  };
+
+  // Undo toast auto-dismisses after a few seconds
+  useEffect(() => {
+    if (!undoToast) return;
+    const t = setTimeout(() => setUndoToast(null), 6000);
+    return () => clearTimeout(t);
+  }, [undoToast]);
 
   const deletePayment = (id) => {
     setPayments(ps => ps.filter(p => p.id !== id));
@@ -561,10 +717,11 @@ function Tally() {
   const exportData = () => {
     const data = {
       app: 'tally',
-      version: 1,
+      version: 2,
       exportedAt: new Date().toISOString(),
       payments,
       pots,
+      paidLog,
       settings: { theme: themeName, currency, skipNonWorking, potsEnabled }
     };
     const json = JSON.stringify(data, null, 2);
@@ -619,6 +776,8 @@ function Tally() {
     }));
     setPayments(migratedPayments);
     setPots(migratedPots);
+    // v1 backups predate the sub-monthly paid log — default to empty
+    setPaidLog(Array.isArray(pendingImport.paidLog) ? pendingImport.paidLog : []);
     if (pendingImport.settings) {
       const s = pendingImport.settings;
       if (s.theme && THEMES[s.theme]) setThemeName(s.theme);
@@ -658,15 +817,22 @@ function Tally() {
   };
 
   const requestReset = () => {
+    // The summary celebrates everything paid this cycle: ticked-off rows
+    // plus every sub-monthly occurrence logged this calendar month.
     const paidList = payments.filter(p => p.paid);
+    const mStart = startOfMonthISO();
+    const logEntries = paidLog.filter(e => e.date >= mStart);
     setRolloverSnapshot({
-      count: paidList.length,
+      count: paidList.length + logEntries.length,
       total: paidList.reduce((s,p) => s + Number(p.amount || 0), 0)
+        + logEntries.reduce((s,e) => s + Number(e.amount || 0), 0)
     });
     setModal('reset');
   };
 
   const confirmReset = () => {
+    // Sub-monthly payments are never paid:true (they self-advance on
+    // tick), so this loop naturally leaves them and their dates alone.
     setPayments(ps => {
       const kept = [];
       for (const p of ps) {
@@ -677,6 +843,10 @@ function Tally() {
       }
       return kept;
     });
+    // Fresh board: the log's occurrences were counted into the summary
+    // snapshot above, so clear them along with the ticked rows.
+    setPaidLog([]);
+    setUndoToast(null);
     setModal('summary');
   };
 
@@ -847,25 +1017,27 @@ function Tally() {
             <div style={{ marginTop: 8 }}>
               {overdue.length > 0 && (
                 <Section theme={theme} label="Overdue" accent={theme.red}>
-                  {overdue.map(p => <PaymentRow key={p.id} p={p} theme={theme} cur={cur}
+                  {overdue.map(p => <PaymentRow key={p.id} p={p} theme={theme} cur={cur} skipNonWorking={skipNonWorking}
                     onToggle={() => togglePaid(p.id)} onEdit={() => openEdit(p)} onDelete={() => deletePayment(p.id)} onDuplicate={() => duplicatePayment(p.id)} />)}
                 </Section>
               )}
               {soon.length > 0 && (
                 <Section theme={theme} label="Due soon" accent={theme.amber}>
-                  {soon.map(p => <PaymentRow key={p.id} p={p} theme={theme} cur={cur}
+                  {soon.map(p => <PaymentRow key={p.id} p={p} theme={theme} cur={cur} skipNonWorking={skipNonWorking}
                     onToggle={() => togglePaid(p.id)} onEdit={() => openEdit(p)} onDelete={() => deletePayment(p.id)} onDuplicate={() => duplicatePayment(p.id)} />)}
                 </Section>
               )}
               {upcoming.length > 0 && (
                 <Section theme={theme} label="Upcoming" accent={theme.textMuted}>
-                  {upcoming.map(p => <PaymentRow key={p.id} p={p} theme={theme} cur={cur}
+                  {upcoming.map(p => <PaymentRow key={p.id} p={p} theme={theme} cur={cur} skipNonWorking={skipNonWorking}
                     onToggle={() => togglePaid(p.id)} onEdit={() => openEdit(p)} onDelete={() => deletePayment(p.id)} onDuplicate={() => duplicatePayment(p.id)} />)}
                 </Section>
               )}
-              {paid.length > 0 && (
+              {(paid.length > 0 || logThisMonth.length > 0) && (
                 <Section theme={theme} label="Paid" accent={theme.green}>
-                  {paid.map(p => <PaymentRow key={p.id} p={p} theme={theme} cur={cur}
+                  {[...logThisMonth].sort((a,b) => (b.date || '').localeCompare(a.date || '')).map(e =>
+                    <LogRow key={e.id} entry={e} theme={theme} cur={cur} onRemove={() => removeLogEntry(e.id)} />)}
+                  {paid.map(p => <PaymentRow key={p.id} p={p} theme={theme} cur={cur} skipNonWorking={skipNonWorking}
                     onToggle={() => togglePaid(p.id)} onEdit={() => openEdit(p)} onDelete={() => deletePayment(p.id)} onDuplicate={() => duplicatePayment(p.id)} />)}
                 </Section>
               )}
@@ -1018,7 +1190,7 @@ function Tally() {
         <ConfirmModal
           theme={theme}
           title="Roll over to next month?"
-          body={rolloverSnapshot ? `${fmtMoney(rolloverSnapshot.total, cur)} across ${rolloverSnapshot.count} payment${rolloverSnapshot.count === 1 ? '' : 's'} will reset. Recurring ones move to their next date. One-offs drop off.` : ''}
+          body={rolloverSnapshot ? `You've sorted ${fmtMoney(rolloverSnapshot.total, cur)} across ${rolloverSnapshot.count} payment${rolloverSnapshot.count === 1 ? '' : 's'}. Monthly and longer payments move to their next date. One-offs drop off. Weekly-style payments already keep their own dates.` : ''}
           confirmLabel="Roll over"
           onCancel={() => setModal(null)}
           onConfirm={confirmReset}
@@ -1049,6 +1221,16 @@ function Tally() {
           confirmLabel="Restore"
           onCancel={cancelImport}
           onConfirm={confirmImport}
+        />
+      )}
+
+      {undoToast && (
+        <UndoToast
+          theme={theme}
+          cur={cur}
+          entry={undoToast.entry}
+          onUndo={() => removeLogEntry(undoToast.entry.id)}
+          onDismiss={() => setUndoToast(null)}
         />
       )}
 
@@ -1671,8 +1853,12 @@ function PotLedger({ pot, theme, cur, onRename, onDelete, onReset, onAdd, onRemo
 }
 
 
-function PaymentRow({ p, theme, cur, onToggle, onEdit, onDelete, onDuplicate }) {
+function PaymentRow({ p, theme, cur, onToggle, onEdit, onDelete, onDuplicate, skipNonWorking = true }) {
   const status = getStatus(p);
+  // For weekly/fortnightly/four-weekly payments, show how many more
+  // times it falls due before the month ends — this is what ties the
+  // row to the hero maths (amount × occurrences left).
+  const occLeft = isSubMonthly(p.recurrence) ? occurrencesLeftThisMonth(p, skipNonWorking) : 0;
   const [swipe, setSwipe] = useState(0);
   const [revealed, setRevealed] = useState(false);
   const touchRef = useRef({ x: 0, y: 0, moved: false, active: false });
@@ -1795,6 +1981,12 @@ function PaymentRow({ p, theme, cur, onToggle, onEdit, onDelete, onDuplicate }) 
                 <span>{recurrenceLabel(p)}</span>
               </>
             )}
+            {occLeft > 1 && (
+              <>
+                <span style={{ color: theme.textFaint }}>·</span>
+                <span style={{ whiteSpace: 'nowrap' }}>{occLeft} left this month</span>
+              </>
+            )}
             {p.notes && (
               <>
                 <span style={{ color: theme.textFaint }}>·</span>
@@ -1826,6 +2018,104 @@ function PaymentRow({ p, theme, cur, onToggle, onEdit, onDelete, onDuplicate }) 
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// A logged sub-monthly tick-off, shown in the Paid section. The
+// payment row itself has already moved on to its next date, so this
+// is the record that an occurrence was paid. Tapping the check
+// reverses it — removes the entry and steps the due date back —
+// mirroring how tapping a paid row's check unticks it.
+function LogRow({ entry, theme, cur, onRemove }) {
+  const paidLabel = (() => {
+    const days = daysUntil(entry.date);
+    if (days === 0) return 'Paid today';
+    if (days === -1) return 'Paid yesterday';
+    const d = new Date(entry.date + 'T00:00:00');
+    return `Paid ${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
+  })();
+  return (
+    <div style={{
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 16,
+      padding: '14px 16px',
+      display: 'flex', alignItems: 'center', gap: 14,
+      opacity: 0.72
+    }}>
+      <button
+        onClick={onRemove}
+        aria-label="Undo this payment"
+        style={{
+          flexShrink: 0, width: 28, height: 28, borderRadius: 14,
+          border: `1.5px solid ${theme.green}`,
+          background: theme.green,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          cursor: 'pointer', transition: 'all 0.2s ease', padding: 0
+        }}>
+        <CheckIcon color={theme.bg} />
+      </button>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: 15, fontWeight: 500, color: theme.text,
+          textDecoration: 'line-through', textDecorationColor: theme.textFaint,
+          marginBottom: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
+        }}>{entry.name}</div>
+        <div style={{ fontSize: 12, color: theme.textMuted }}>{paidLabel}</div>
+      </div>
+      <div style={{ textAlign: 'right', flexShrink: 0 }}>
+        <div style={{
+          fontFamily: "'Fraunces', serif", fontSize: 18,
+          fontFeatureSettings: '"tnum"',
+          color: theme.text,
+          textDecoration: 'line-through', textDecorationColor: theme.textFaint
+        }}>{fmtMoney(entry.amount, cur)}</div>
+        <div style={{
+          display: 'inline-block', marginTop: 4,
+          fontSize: 10, fontWeight: 600, letterSpacing: '0.06em',
+          textTransform: 'uppercase', color: theme.green,
+          padding: '2px 8px', background: theme.greenSoft, borderRadius: 999
+        }}>Paid</div>
+      </div>
+    </div>
+  );
+}
+
+// Brief confirmation after ticking a sub-monthly payment — the row
+// jumps to its next date rather than showing as paid, so this is the
+// calm "that worked" moment, with a short window to undo.
+function UndoToast({ theme, cur, entry, onUndo, onDismiss }) {
+  return (
+    <div style={{
+      position: 'fixed',
+      left: '50%', transform: 'translateX(-50%)',
+      bottom: 'calc(116px + env(safe-area-inset-bottom))',
+      zIndex: 60,
+      maxWidth: 'calc(100vw - 40px)',
+      display: 'flex', alignItems: 'center', gap: 12,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 16,
+      padding: '12px 14px 12px 18px',
+      boxShadow: theme.shadow,
+      animation: 'tallyToastIn 0.35s cubic-bezier(0.22,1,0.36,1)'
+    }}>
+      <style>{`@keyframes tallyToastIn { from { opacity: 0; transform: translateX(-50%) translateY(12px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }`}</style>
+      <div style={{ fontSize: 13, color: theme.text, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        <span style={{ fontWeight: 600 }}>{fmtMoney(entry.amount, cur)}</span>
+        <span style={{ color: theme.textMuted }}> ticked off · next due {friendlyDate(entry.newDueDate)}</span>
+      </div>
+      <button onClick={onUndo} style={{
+        flexShrink: 0, background: 'transparent', border: 'none',
+        color: theme.accent, fontSize: 13, fontWeight: 600,
+        fontFamily: 'inherit', cursor: 'pointer', padding: '4px 6px'
+      }}>Undo</button>
+      <button onClick={onDismiss} aria-label="Dismiss" style={{
+        flexShrink: 0, background: 'transparent', border: 'none',
+        color: theme.textFaint, fontSize: 16, lineHeight: 1,
+        fontFamily: 'inherit', cursor: 'pointer', padding: '4px 6px'
+      }}>×</button>
     </div>
   );
 }
@@ -2975,7 +3265,7 @@ const SettingsIcon = () => (
   // Visit tally.littleappstudio.co.uk/?debug=storage to see this.
   // ============================================================
   const StorageDebugView = () => {
-    const keys = ['tally-payments', 'tally-payments-backup', 'tally-pots', 'tally-pots-backup', 'tally-theme', 'tally-currency'];
+    const keys = ['tally-payments', 'tally-payments-backup', 'tally-pots', 'tally-pots-backup', 'tally-paid-log', 'tally-theme', 'tally-currency'];
     const rows = keys.map(k => {
       let raw = null;
       try { raw = localStorage.getItem(k); } catch (e) { raw = `<error reading: ${e.message}>`; }
