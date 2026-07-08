@@ -237,13 +237,16 @@ const nextDueDate = (currentISO, recurrence, customDay, skipNonWorking = true) =
 };
 
 // ============================================================
-// SUB-MONTHLY PAYMENTS (weekly / fortnightly / four-weekly)
+// SUB-MONTHLY PAYMENTS (weekly / fortnightly)
 // These recur multiple times within a calendar month, so they
 // roll over instantly on tick (not at monthly reset), and their
 // contribution to "left to pay" is amount × occurrences left
 // between their current due date and the end of this month.
+// Four-weekly is deliberately NOT here: it lands once per month
+// in all but one month a year, so it behaves like monthly —
+// tick marks it paid, and it rolls over at the monthly reset.
 // ============================================================
-const SUB_MONTHLY = ['weekly', 'fortnightly', 'four-weekly'];
+const SUB_MONTHLY = ['weekly', 'fortnightly'];
 const isSubMonthly = (recurrence) => SUB_MONTHLY.includes(recurrence);
 
 const endOfMonthISO = () => {
@@ -328,7 +331,7 @@ function Tally() {
   const [transactionForPot, setTransactionForPot] = useState(null); // { potId, direction: 'in'|'out' }
   const [resetForPot, setResetForPot] = useState(null); // pot id awaiting reset confirmation
   const [rolloverSnapshot, setRolloverSnapshot] = useState(null);
-  // Log of sub-monthly (weekly/fortnightly/four-weekly) tick-offs.
+  // Log of sub-monthly (weekly/fortnightly) tick-offs.
   // These payments roll straight over to their next date when ticked,
   // so this log is the record that they were paid — it feeds the
   // "Paid" figure, the Paid section, and the rollover summary.
@@ -392,7 +395,7 @@ function Tally() {
             }
           } catch {}
         }
-        // Migrate: under the old model a weekly/fortnightly/four-weekly
+        // Migrate: under the old model a weekly or fortnightly
         // payment could sit ticked-off as paid until monthly reset. Under
         // the new model those roll over instantly, so convert any lingering
         // paid sub-monthly rows: log the payment, advance the due date,
@@ -411,6 +414,22 @@ function Tally() {
               newDueDate: newDue
             }, ...loadedLog];
             return { ...pay, paid: false, paidDate: undefined, dueDate: newDue };
+          });
+        }
+        // Migrate: four-weekly payments moved back to the monthly model
+        // (tick sets the paid flag, rolls over at monthly reset). Any
+        // four-weekly ticked under the brief instant-rollover model has
+        // a log entry and an advanced date — reverse the most recent
+        // matching entry back into a paid flag so nothing double-counts.
+        // Only reverses when the stored newDueDate still matches the
+        // payment's current date (i.e. not manually edited since).
+        if (migratedPayments) {
+          migratedPayments = migratedPayments.map(pay => {
+            if (pay.recurrence !== 'four-weekly' || pay.paid) return pay;
+            const entry = loadedLog.find(e => e.paymentId === pay.id && e.newDueDate === pay.dueDate);
+            if (!entry) return pay;
+            loadedLog = loadedLog.filter(e => e.id !== entry.id);
+            return { ...pay, paid: true, paidDate: entry.date, dueDate: entry.prevDueDate };
           });
         }
         setPaidLog(loadedLog);
@@ -1855,7 +1874,7 @@ function PotLedger({ pot, theme, cur, onRename, onDelete, onReset, onAdd, onRemo
 
 function PaymentRow({ p, theme, cur, onToggle, onEdit, onDelete, onDuplicate, skipNonWorking = true }) {
   const status = getStatus(p);
-  // For weekly/fortnightly/four-weekly payments, show how many more
+  // For weekly/fortnightly payments, show how many more
   // times it falls due before the month ends — this is what ties the
   // row to the hero maths (amount × occurrences left).
   const occLeft = isSubMonthly(p.recurrence) ? occurrencesLeftThisMonth(p, skipNonWorking) : 0;
